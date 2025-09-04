@@ -60,19 +60,104 @@ char* find_executable(const char *command) {
     return NULL;
 }
 
-// Function to tokenize command into arguments 
+// Function to tokenize command into arguments (quotes & escapes handled)
 int parse_command(char *input, char **argv) {
     int argc = 0;
-    char *token = strtok(input, " \t"); // divide input by spaces and tabs
-    while (token != NULL && argc < MAX_ARGS - 1) { // while there are tokens (< max args)
-        argv[argc++] = token; // add token to argv and increment argc (argument count)
-        //printf("argv[%d]: %s\n", argc-1, token); // debug printer for arguments
-        token = strtok(NULL, " \t"); 
+    int i = 0;
+    char current_arg[MAX_CMD_LEN]; 
+    int arg_pos = 0; // index of current_arg
+    int in_single_quote = 0;
+    int in_double_quote = 0;
+
+    while (input[i] != '\0' && argc < MAX_ARGS - 1) {
+        char ch = input[i];
+
+        if (in_single_quote) {
+            if (ch == '\'') {
+                in_single_quote = 0; // close single quote
+            } else {
+                current_arg[arg_pos++] = ch; // add char to current arg (no escape)
+            }
+        }
+        else if (in_double_quote) {
+            if (ch == '"') {
+                in_double_quote = 0; // close double quote
+            } else if (ch == '\\') {
+                // handle escape sequences in double quotes
+                char next = input[i + 1];
+                if (next == '"' || next == '\\' || next == '$' || next == '`' || next == '\n') { // char escapable
+                    current_arg[arg_pos++] = next; // add escaped char
+                    i++; // skip next char
+                } else {
+                    current_arg[arg_pos++] = ch; // add backslash as is
+                }
+            } else {
+                current_arg[arg_pos++] = ch; // add char to current arg
+            }
+        }
+        else { // outside quotes
+            if (ch == '\'') { // open single quote
+                in_single_quote = 1; 
+            } else if (ch == '"') { // open double quote
+                in_double_quote = 1;
+            } else if (ch == '\\') { // handle escape outside quotes
+                if (input[i + 1] != '\0') { // ensure not end of string
+                    current_arg[arg_pos++] = input[i + 1]; // add next char
+                    i++; 
+                }
+            } else if (ch == ' ' || ch == '\t') { // check for space or tab
+                if (arg_pos > 0) { // fine argomento
+                    current_arg[arg_pos] = '\0'; // null terminate current arg
+                    argv[argc] = malloc(arg_pos + 1); // use malloc to allocate memory for the argument (otherwise it will be lost after the function ends)
+                    if (argv[argc] != NULL) { 
+                        strcpy(argv[argc], current_arg); // copy current arg (char) to argv (array of strings)
+                        argc++; 
+                    }
+                    arg_pos = 0; // reset for next arg
+                }
+                // skip consecutive spaces/tabs
+                while (input[i + 1] == ' ' || input[i + 1] == '\t') i++;
+            } else {
+                current_arg[arg_pos++] = ch; // add char to current arg
+            }
+        }
+
+        i++; 
     }
-    argv[argc] = NULL; 
-    
+
+    // Add the last argument if exists
+    if (arg_pos > 0) { 
+        current_arg[arg_pos] = '\0'; // when the loop ends, null terminate current arg
+        argv[argc] = malloc(arg_pos + 1); // allocate memory for the last argument
+        if (argv[argc] != NULL) {
+            strcpy(argv[argc], current_arg); // copy last arg to argv
+            argc++; 
+        }
+    }
+
+    // Check for unclosed quotes
+    if (in_single_quote) {
+        fprintf(stderr, "Error: Unclosed single quote\n");
+        for (int j = 0; j < argc; j++) free(argv[j]); // free previously allocated memory
+        return -1;
+    }
+    if (in_double_quote) {
+        fprintf(stderr, "Error: Unclosed double quote\n");
+        for (int j = 0; j < argc; j++) free(argv[j]);
+        return -1;
+    }
+
+    argv[argc] = NULL; // null terminate argv
     return argc;
 }
+
+// Release allocated memory for argv
+void free_argv(char **argv, int argc) {
+    for (int i = 0; i < argc; i++) {
+        free(argv[i]); //free each arg inside the array of strings
+    }
+}
+
 
 // Function to check if command is a builtin (used in type command)
 int is_builtin(const char *command) {

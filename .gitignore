@@ -1,0 +1,10 @@
+# ide files
+.vscode
+main
+output/
+
+# ignore files
+*.log
+*.tmp
+*.bak
+*.swp
