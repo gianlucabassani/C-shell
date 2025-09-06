@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <limits.h>
+#include <fcntl.h>
 
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 64
@@ -154,7 +155,10 @@ int parse_command(char *input, char **argv) {
 // Release allocated memory for argv
 void free_argv(char **argv, int argc) {
     for (int i = 0; i < argc; i++) {
-        free(argv[i]); //free each arg inside the array of strings
+        if (argv[i] != NULL) {
+            free(argv[i]); //free each arg inside the array of strings
+        }
+        argv[i] = NULL; // set pointer to NULL after freeing
     }
 }
 
@@ -170,7 +174,22 @@ int is_builtin(const char *command) {
 }
 
 // Function to execute builtin commands
-int execute_builtin(char **argv) {
+int execute_builtin(char **argv, char *redirect_file) {
+    int original_stdout = -1;
+    int redirect_fd = -1;
+    
+    // Handle output redirection for builtin commands
+    if (redirect_file != NULL) {
+        original_stdout = dup(STDOUT_FILENO); // save original stdout
+        redirect_fd = open(redirect_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (redirect_fd == -1) {
+            perror("open for redirection failed");
+            return 1;
+        }
+        dup2(redirect_fd, STDOUT_FILENO); // redirect stdout to file
+    }
+    
+    int result = 0;
     
     // check if the command is "exit" and the second argument is "0":
     if (strcmp(argv[0], "exit") == 0 && argv[1] && strcmp(argv[1], "0") == 0) {
@@ -192,20 +211,20 @@ int execute_builtin(char **argv) {
     else if (strcmp(argv[0], "type") == 0) {
         if (argv[1] == NULL) {
             printf("type: missing argument\n");
-            return 1;
-        }
-
-        // Check if it's a built-in
-        if (is_builtin(argv[1])) {
-            printf("%s is a shell builtin\n", argv[1]);
+            result = 1;
         } else {
-            // Search in PATH
-            char *full_path = find_executable(argv[1]); // return full path or NULL
-            if (full_path != NULL) {
-                printf("%s is %s\n", argv[1], full_path);
-                free(full_path); // free allocated memory
+            // Check if it's a built-in
+            if (is_builtin(argv[1])) {
+                printf("%s is a shell builtin\n", argv[1]);
             } else {
-                printf("%s is not found\n", argv[1]);
+                // Search in PATH
+                char *full_path = find_executable(argv[1]); // return full path or NULL
+                if (full_path != NULL) {
+                    printf("%s is %s\n", argv[1], full_path);
+                    free(full_path); // free allocated memory
+                } else {
+                    printf("%s is not found\n", argv[1]);
+                }
             }
         }
     }
@@ -219,7 +238,7 @@ int execute_builtin(char **argv) {
             free(cwd); // free memory with the path
         } else {
             perror("getcwd failed");
-            return 1;
+            result = 1;
         }
     }
     
@@ -230,21 +249,27 @@ int execute_builtin(char **argv) {
             target_dir = getenv("HOME");
             if (target_dir == NULL) {
                 perror("cd: HOME not set");
-                return 1;
+                result = 1;
             }
         }
-        if (chdir(target_dir) != 0) {
+        if (target_dir != NULL && chdir(target_dir) != 0) {
             perror("cd failed");
-            return 1;
+            result = 1;
         }
-        return 0;
-
     }
-    return 0;
+    
+    // Restore original stdout if we redirected
+    if (redirect_file != NULL) {
+        dup2(original_stdout, STDOUT_FILENO); // restore stdout
+        close(original_stdout);
+        close(redirect_fd);
+    }
+    
+    return result;
 }
 
 // Function to execute external commands
-int execute_external(char **argv) {
+int execute_external(char **argv, char *redirect_file) {
     char *full_path = find_executable(argv[0]);
     if (full_path == NULL) {
         printf("%s: command not found\n", argv[0]);
@@ -261,6 +286,16 @@ int execute_external(char **argv) {
     }
     else if (pid == 0) {
         // Child process
+        if (redirect_file != NULL) {
+            int out_f = open(redirect_file, O_WRONLY | O_CREAT | O_TRUNC, 0644); 
+            // where O_WRONLY = open for write only, O_CREAT = create if not exists, O_TRUNC = truncate to zero length if exists, 0644 = permissions
+            if (out_f == -1) {
+                perror("open for redirection failed");
+                exit(1);
+            }
+            dup2(out_f, STDOUT_FILENO); // redirect stdout to the file (STDOUT_FILENO = standard output file descriptor)
+            close(out_f);
+        }
         extern char **environ; // extern = external variable (used to access environment variables)
         if (execve(full_path, argv, environ) == -1) {
             perror("execve failed");
@@ -276,8 +311,8 @@ int execute_external(char **argv) {
         free(full_path);
         
         // Return exit status of the child
-        if (WIFEXITED(status)) {
-            return WEXITSTATUS(status);
+        if (WIFEXITED(status)) { // (WIFEXITED = macro to check if child terminated normally)
+            return WEXITSTATUS(status); // (WEXITSTATUS = macro to get exit status of child)
         }
         return 1;
     }
@@ -297,6 +332,7 @@ int main() {
 
         char input[MAX_CMD_LEN];
         char *argv[MAX_ARGS];
+        char *redirect_filename = NULL;
 
         // Read command from stdin
         read_command(input);
@@ -308,17 +344,57 @@ int main() {
 
         // Tokenize command into arguments
         int argc = parse_command(input, argv);
-        if (argc == 0) {
+        
+        // Handle parsing errors (unclosed quotes)
+        if (argc == -1) {
+            continue; // Skip to next iteration
+        }
+        
+        // Handle empty command after parsing
+        if (argc == 0 || argv[0] == NULL) {
             continue;
+        }
+
+        char *redirect_file = NULL;
+        for (int i = 0; i < argc; i++) {
+            if (strcmp(argv[i], ">") == 0 || strcmp(argv[i], "1>") == 0) {
+                if (i + 1 < argc && argv[i + 1] != NULL) {
+                    redirect_file = strdup(argv[i + 1]); 
+                    // strdup to allocate memory for filename for a safe copy
+                    if (redirect_file == NULL) {
+                        perror("strdup failed");
+                        free_argv(argv, argc);
+                        continue;
+                    }
+                    // Free the redirection operator and filename from argv
+                    free(argv[i]); 
+                    free(argv[i + 1]);
+                    argv[i] = NULL; // terminate args before redirection
+                    argc = i; // update argc to exclude redirection part
+                } else {
+                    fprintf(stderr, "Error: No file specified for redirection\n");
+                    free_argv(argv, argc);
+                    continue; // Skip command execution
+                }
+                break;
+            }     
         }
 
         // Execute command
         if (is_builtin(argv[0])) {
-            execute_builtin(argv);
+            execute_builtin(argv, redirect_file);
         } else {
-            execute_external(argv);
+            execute_external(argv, redirect_file);
+        }
+        
+        // Free allocated memory for arguments
+        free_argv(argv, argc);
+        
+        // Free redirect filename if allocated
+        if (redirect_filename != NULL) {
+            free(redirect_filename);
         }
     }
 
-    return 0;
+return 0;
 }
