@@ -174,11 +174,14 @@ int is_builtin(const char *command) {
 }
 
 // Function to execute builtin commands
-int execute_builtin(char **argv, char *redirect_file, char *redirect_stderr_file) {
+int execute_builtin(char **argv, char *redirect_file, char *redirect_stderr_file, char *append_file, char *append_stderr_file) {
+    
     int original_stdout = -1;
     int original_stderr = -1;
+
+    // file descriptors (non-negative integer that uniquely identifies an opened file or other input/output resource)
     int redirect_fd = -1;
-    int redicret_stderr_fd = -1;
+    int redirect_stderr_fd = -1;
 
     // Handle output redirection for builtin commands
     if (redirect_file != NULL) {
@@ -190,23 +193,40 @@ int execute_builtin(char **argv, char *redirect_file, char *redirect_stderr_file
         }
         dup2(redirect_fd, STDOUT_FILENO); // redirect stdout to file
     }
+    
+    // append stdout
+    if (append_file != NULL) {
+        original_stdout = dup(STDOUT_FILENO);
+        redirect_fd = open(append_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (redirect_fd == -1) {
+            perror("open for append failed");
+            return 1;
+        }
+        dup2(redirect_fd, STDOUT_FILENO);
+    }
 
+    // truncate stderr redirection (if both stdout and stderr redirection are specified, stdout redirection is restored first)
     if (redirect_stderr_file != NULL) {
         original_stderr = dup(STDERR_FILENO);
-        redicret_stderr_fd = open(redirect_stderr_file, O_WRONLY | O_CREAT | O_TRUNC, 0644); 
-        if (redicret_stderr_fd == -1) {
+        redirect_stderr_fd = open(redirect_stderr_file, O_WRONLY | O_CREAT | O_TRUNC, 0644); 
+        if (redirect_stderr_fd == -1) {
             perror("open for stderr redirection failed");
+            return 1;
         }
-        if (redirect_file != NULL) {
-            dup2(original_stdout, STDOUT_FILENO);
-            close(original_stdout);
-            close(redirect_fd);
-        }
-        return 1;
+        dup2(redirect_stderr_fd, STDERR_FILENO);
     }
-    dup2(redicret_stderr_fd, STDERR_FILENO);
 
-    
+    // append stderr redirection
+    if (append_stderr_file != NULL) {
+        original_stderr = dup(STDERR_FILENO);
+        redirect_stderr_fd = open(append_stderr_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (redirect_stderr_fd == -1) {
+            perror("open for stderr append failed");
+            return 1;
+        }
+        dup2(redirect_stderr_fd, STDERR_FILENO);
+    }
+
     int result = 0;
     
     // check if the command is "exit" and the second argument is "0":
@@ -277,24 +297,25 @@ int execute_builtin(char **argv, char *redirect_file, char *redirect_stderr_file
     }
     
     // Restore original stdout if we redirected
-    if (redirect_file != NULL) {
-        dup2(original_stdout, STDOUT_FILENO); // restore stdout
+    if (redirect_file != NULL || append_file != NULL) {
+        dup2(original_stdout, STDOUT_FILENO);
         close(original_stdout);
         close(redirect_fd);
     }
-
-    if (redirect_stderr_file != NULL) {
-        dup2(original_stderr, STDERR_FILENO); // restore stdout
+    if (redirect_stderr_file != NULL || append_stderr_file != NULL) {
+        dup2(original_stderr, STDERR_FILENO);
         close(original_stderr);
-        close(redicret_stderr_fd);
+        close(redirect_stderr_fd);
     }
     
     return result;
 }
 
 // Function to execute external commands
-int execute_external(char **argv, char *redirect_file, char *redirect_stderr_file) {
+int execute_external(char **argv, char *redirect_file, char *redirect_stderr_file, char *append_file, char *append_stderr_file) {
+
     char *full_path = find_executable(argv[0]);
+
     if (full_path == NULL) {
         printf("%s: command not found\n", argv[0]);
         return 1;
@@ -321,6 +342,17 @@ int execute_external(char **argv, char *redirect_file, char *redirect_stderr_fil
             close(out_f);
         }
 
+        // append stdout
+        if (append_file != NULL) {
+            int out_f = open(append_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (out_f == -1) {
+                perror("open for append failed");
+                exit(1);
+            }
+            dup2(out_f, STDOUT_FILENO);
+            close(out_f);
+        }
+
         // stderr redirect
         if (redirect_stderr_file != NULL) {
             int err_f = open(redirect_stderr_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -331,6 +363,18 @@ int execute_external(char **argv, char *redirect_file, char *redirect_stderr_fil
             dup2(err_f, STDERR_FILENO);
             close(err_f);
         }
+
+        // append stderr
+        if (append_stderr_file != NULL) {
+            int err_f = open(append_stderr_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (err_f == -1) {
+                perror("open for stderr append failed");
+                exit(1);
+            }
+            dup2(err_f, STDERR_FILENO);
+            close(err_f);
+        }
+
 
         extern char **environ; // extern = external variable (used to access environment variables)
         if (execve(full_path, argv, environ) == -1) {
@@ -357,7 +401,6 @@ int execute_external(char **argv, char *redirect_file, char *redirect_stderr_fil
 }
 
 
-
 int main() {
     // Disable buffering for immediate output
     setbuf(stdout, NULL);
@@ -370,6 +413,8 @@ int main() {
         char *argv[MAX_ARGS];
         char *redirect_file = NULL;
         char *redirect_stderr_file = NULL;
+        char *append_file = NULL;
+        char *append_stderr_file = NULL;
 
         // Read command from stdin
         read_command(input);
@@ -393,13 +438,15 @@ int main() {
         }
 
         for (int i = 0; i < argc; i++) {
+
+            // stdout redirection
             if (strcmp(argv[i], ">") == 0 || strcmp(argv[i], "1>") == 0) {
                 if (i + 1 < argc && argv[i + 1] != NULL) {
-                    redirect_file = strdup(argv[i + 1]); 
+                    redirect_file = strdup(argv[i + 1]);  // allocate memory for filename (strdup is safer than malloc+strcpy) 
                     // strdup to allocate memory for filename for a safe copy
-                    if (redirect_file == NULL) {
+                    if (!redirect_file) {
                         perror("strdup failed");
-                        free_argv(argv, argc);
+                        free_argv(argv, argc); 
                         continue;
                     }
                     // Free the redirection operator and filename from argv
@@ -414,6 +461,30 @@ int main() {
                 }
                 break;
             }
+
+            // FIXED: stdout appending - use argv[i] instead of argv[1]
+            else if (strcmp(argv[i], ">>") == 0 || strcmp(argv[i], "1>>") == 0) {
+                if (i + 1 < argc && argv[i+1] != NULL) {
+                    append_file = strdup(argv[i + 1]);
+                    if (append_file == NULL) {
+                        perror("strdup failed");
+                        free_argv(argv, argc);
+                        continue;
+                    }
+                    // free redirect op and filename from argv
+                    free(argv[i]);
+                    free(argv[i + 1]);
+                    argv[i] = NULL; // terminate args before redirection
+                    argc = i; // update argc to exclude redirection part
+                } else {
+                    fprintf(stderr, "Error: No file specified for stdout appending\n");
+                    free_argv(argv, argc);
+                    continue;
+                }
+                break;
+            }
+
+            // stderr redirection
             else if (strcmp(argv[i], "2>") == 0) {
                 if (i + 1 < argc && argv[i + 1] != NULL) {
                     redirect_stderr_file = strdup(argv[i + 1]); 
@@ -426,35 +497,61 @@ int main() {
                     // Free the redirection operator and filename from argv
                     free(argv[i]); 
                     free(argv[i + 1]);
-                    
-                    // Shift next args to the left
-                    for (int j = i; j < argc - 2; j++) {
-                        argv[j] = argv[j + 2];
-                    }
-                    argc -= 2; // decrement arg counter by 2
-                    i--; // decrement i to recheck the current position
+                    argv[i] = NULL; 
+                    argc = i; // update argc to exclude redirection part
                 } else {
                     fprintf(stderr, "Error: No file specified for stderr redirection\n");
                     free_argv(argv, argc);
-                    if (redirect_file != NULL) free(redirect_file);
+                    if (redirect_file) free(redirect_file);
                     continue;
                 }
-            }     
+                break;
+            }      
+            else if (strcmp(argv[i], "2>>") == 0) {
+                if (i + 1 < argc && argv[i + 1] != NULL) {
+                    append_stderr_file = strdup(argv[i + 1]);
+                    if (!append_stderr_file) {
+                        perror("strdup failed");
+                        free_argv(argv, argc);
+                        if (redirect_file) free(redirect_file);
+                        continue;
+                    }
+                    free(argv[i]);
+                    free(argv[i + 1]);
+                    argv[i] = NULL;
+                    argc = i;
+                } else {
+                    fprintf(stderr, "Error: No file specified for stderr append\n");
+                    free_argv(argv, argc);
+                    if (redirect_file) free(redirect_file);
+                    continue;
+                }
+                break;
+            }
         }
     
         // Execute command
         if (is_builtin(argv[0])) {
-            execute_builtin(argv, redirect_file, redirect_stderr_file);
+            execute_builtin(argv, redirect_file, redirect_stderr_file, append_file, append_stderr_file);
         } else {
-            execute_external(argv, redirect_file, redirect_stderr_file);
+            execute_external(argv, redirect_file, redirect_stderr_file, append_file, append_stderr_file);
         }
         
         // Free allocated memory for arguments
         free_argv(argv, argc);
         
-        // Free redirect file if allocated
+        // Free redirect files if allocated
         if (redirect_file != NULL) {
             free(redirect_file);
+        }
+        if (redirect_stderr_file != NULL) {
+            free(redirect_stderr_file);
+        }
+        if (append_file != NULL) {
+            free(append_file);
+        }
+        if (append_stderr_file != NULL) {
+            free(append_stderr_file);
         }
     }
 
