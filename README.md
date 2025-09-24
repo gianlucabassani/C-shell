@@ -38,14 +38,26 @@ This project implements a **POSIX-compliant shell** capable of interpreting shel
 * Uses `fork()` to create child processes.
 * Uses `execve()` to execute commands.
 
+### 5. I/O Redirection
+
+* Stdout redirection: > (saving to file) and >> (appending to file).
+* Stderr redirection: 2> (saving to file) and 2>> (appending to file).
+* Works with both builtin and external commands.
+
+### 6. Tab Completion (IN PROGRESS)
+
+* Basic command completion for builtin commands using GNU readline library.
+* Completes ech → echo  and exi → exit  with trailing space.
+* Only completes at command position (not arguments).
 
 ---
 
 ## Compilation and Execution
 
 ```bash
-gcc shell.c -o shell
-./shell
+gcc -o shell main.c -lreadline
+
+./main
 ```
 
 ---
