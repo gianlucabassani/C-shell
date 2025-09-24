@@ -3,8 +3,7 @@
 main
 output/
 
-# ignore files
-*.log
+# test files
+*.txt
 *.tmp
 *.bak
-*.swp

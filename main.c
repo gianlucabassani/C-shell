@@ -6,6 +6,8 @@
 #include <sys/wait.h>
 #include <limits.h>
 #include <fcntl.h>
+#include <readline/readline.h>
+#include <readline/history.h>
 
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 64
@@ -13,6 +15,71 @@
 
 static const char *builtin_cmd[CMD_AVAILABLE] = {"exit", "echo", "type", "pwd", "cd"};
 
+char *builtin_generator(const char *text, int state) {
+    static int list_index, len;
+    const char *name; 
+
+    // if new word, initialize 
+    if (!state) {
+        list_index = 0; // reset index
+        len = strlen(text); //length of the input text
+    }
+
+    // Return the next name that matchers from builtin_cmd
+    while (list_index < CMD_AVAILABLE) {
+        name = builtin_cmd[list_index]; 
+        list_index++; // move to next index
+
+        if (strncmp(name, text, len) == 0) { // if the beginning of the name matches
+            char *result = malloc(strlen(name) +2); // +2 for null terminator and space
+            if (result) {
+                strcpy(result,name); // copy name to result
+                strcat(result, ""); // add space after the name
+            }
+            return result; // mathched name
+        }
+    }
+    return NULL;
+}
+
+char **builtin_completition(const char *text, int start, int end) {
+    char **matches = NULL;
+
+    // only complete if beginning of line (complete only command itself)
+    if (start == 0) {
+        matches = rl_completion_matches(text, builtin_generator);
+    }
+    return matches; // return array of matches
+}
+
+void initialize_readline() {
+    // Set custom completion function
+    rl_attempted_completion_function = builtin_completition;
+
+    // Don't append space automatically (use space in generator)
+    rl_completion_append_character = '\0';
+
+    // custom character appending
+    rl_completion_suppress_append = 0;
+}
+
+char *read_command_readline() {
+    char *input = readline("$ ");
+
+    // Handle EOF (Ctrl+D)
+    if (input == NULL) {
+        printf("\n");
+        exit(0);
+    }
+
+    // Add to history if not empty
+    if (input && *input) { 
+        add_history(input);
+    }
+    return input;
+}
+
+/* ============ OLD ===========
 
 // Function to read input from stdin
 void read_command(char *input) {
@@ -28,6 +95,8 @@ void read_command(char *input) {
         input[len - 1] = '\0';
     }
 }
+*/
+
 
 // Function to find executable in PATH
 char* find_executable(const char *command) {
@@ -406,21 +475,23 @@ int main() {
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
+    // initialize readline library
+    initialize_readline();
+    
     while (1) {
-        printf("$ ");
 
-        char input[MAX_CMD_LEN];
         char *argv[MAX_ARGS];
         char *redirect_file = NULL;
         char *redirect_stderr_file = NULL;
         char *append_file = NULL;
         char *append_stderr_file = NULL;
 
-        // Read command from stdin
-        read_command(input);
+        // Read command using readline (tab completion enabled)
+        char *input = read_command_readline();
 
         // handle empty input
         if (strlen(input) == 0) {
+            free(input);
             continue;
         }
 
@@ -462,7 +533,7 @@ int main() {
                 break;
             }
 
-            // FIXED: stdout appending - use argv[i] instead of argv[1]
+            // stdout appending
             else if (strcmp(argv[i], ">>") == 0 || strcmp(argv[i], "1>>") == 0) {
                 if (i + 1 < argc && argv[i+1] != NULL) {
                     append_file = strdup(argv[i + 1]);
