@@ -55,9 +55,9 @@ This project implements a **POSIX-compliant shell** capable of interpreting shel
 ## Compilation and Execution
 
 ```bash
-gcc -o shell main.c -lreadline
+gcc  main.c -o shell -lreadline
 
-./main
+./shell
 ```
 
 ---
