@@ -9,6 +9,7 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 
+
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 64
 #define CMD_AVAILABLE 5
@@ -330,7 +331,7 @@ int execute_builtin(char **argv, char *redirect_file, char *redirect_stderr_file
                     printf("%s is %s\n", argv[1], full_path);
                     free(full_path); // free allocated memory
                 } else {
-                    printf("%s is not found\n", argv[1]);
+                    printf("%s: not found\n", argv[1]);
                 }
             }
         }
@@ -352,15 +353,16 @@ int execute_builtin(char **argv, char *redirect_file, char *redirect_stderr_file
     // === "cd" command ===
     else if (strcmp(argv[0], "cd") == 0) {
         char *target_dir = argv[1];
-        if (target_dir == NULL) {
+        if (target_dir == NULL || strcmp(target_dir,"~") == 0) {
             target_dir = getenv("HOME");
             if (target_dir == NULL) {
-                perror("cd: HOME not set");
+                perror("cd: HOME not set\n");
                 result = 1;
             }
         }
-        if (target_dir != NULL && chdir(target_dir) != 0) {
-            perror("cd failed");
+        if (chdir(target_dir) != 0) {
+            fprintf(stderr, "cd: %s: ", target_dir);
+	    perror("");
             result = 1;
         }
     }
