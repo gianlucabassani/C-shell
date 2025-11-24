@@ -1,14 +1,14 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <limits.h>
-#include <fcntl.h>
-#include <readline/readline.h>
-#include <readline/history.h>
-
+#include <stdio.h> // standard I/O
+#include <stdlib.h> // memory allocation
+#include <string.h> // strings functions
+#include <unistd.h> // posix api (fork, execve, ..)
+#include <sys/types.h> // data types for syscalls
+#include <sys/wait.h> // wait for process to change state
+#include <limits.h> // system limits
+#include <fcntl.h> // file control options (open, o_wronly, ..)
+#include <readline/readline.h> // gnu readline lib
+#include <readline/history.h> // command history
+#include <dirent.h> // directory ops (opendir, readdir, ..)
 
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 64
@@ -16,39 +16,115 @@
 
 static const char *builtin_cmd[CMD_AVAILABLE] = {"exit", "echo", "type", "pwd", "cd"};
 
-char *builtin_generator(const char *text, int state) {
-    static int list_index, len;
-    const char *name; 
+/*
+static = variable only visible in this file
+const char * = array of pointers to const chars 
+*/
 
-    // if new word, initialize 
+// Helper function to duplicate a string (used in completion)
+char *dupstr(char *s) {
+    char *r;
+    r = malloc(strlen(s) + 1); // allocate memory +1 for null temrinator
+    strcpy(r, s); // copy string s to new memory r
+    return (r); // return pointer to new string
+}
+// the caller must free() later
+
+
+char *command_generator(const char *text, int state) {
+    static int list_index, len;
+    const char *name;
+    
+    // Static variables to maintain state across calls
+    static char *path = NULL;
+    static char *dir = NULL;
+    static DIR *dirp = NULL;
+    static struct dirent *dp = NULL;
+
+    /*
+    - Normal local variables are destroyed when fun returns
+    - static local variables persists between fun calls, this consets to remember where we left off 
+    */
+
+    // First call (state == 0)
     if (!state) {
-        list_index = 0; // reset index
-        len = strlen(text); //length of the input text
+        list_index = 0;
+        len = strlen(text);
+        
+        // Clean up and get fresh PATH
+        if (path) {
+            free(path);
+        }
+        
+        const char *path_env = getenv("PATH"); 
+        if (path_env) {
+            path = strdup(path_env); // make a copy we can modify
+            dir = strtok(path, ":"); // tokenize path by ':'
+        } else {
+            path = NULL;
+            dir = NULL;
+        }
+        
+        // Close any open directory
+        if (dirp) {
+            closedir(dirp);
+        }
+        dirp = NULL;
     }
 
-    // Return the next name that matchers from builtin_cmd
+    // First, check built-in commands
     while (list_index < CMD_AVAILABLE) {
-        name = builtin_cmd[list_index]; 
-        list_index++; // move to next index
-
-        if (strncmp(name, text, len) == 0) { // if the beginning of the name matches
-            char *result = malloc(strlen(name) +2); // +2 for null terminator and space
-            if (result) {
-                strcpy(result,name); // copy name to result
-                strcat(result, ""); // add space after the name
-            }
-            return result; // mathched name
+        name = builtin_cmd[list_index];
+        list_index++;
+        
+        if (strncmp(name, text, len) == 0) { // does it match?
+            return dupstr((char *)name); // return a copy
         }
     }
-    return NULL;
+
+    // Then scan through PATH directories
+    while (dir) {
+        if (!dirp) {
+            dirp = opendir(dir); // open dir for reading
+        }
+        
+        if (dirp) {
+            while ((dp = readdir(dirp)) != NULL) { // read each entry
+                if (strncmp(dp->d_name, text, len) == 0) { 
+                    char fpath[MAX_CMD_LEN]; 
+                    snprintf(fpath, sizeof(fpath), "%s/%s", dir, dp->d_name);
+                    
+                    // Check if file is executable
+                    if (access(fpath, X_OK) == 0) { // check if file has execute permissions
+                        return dupstr(dp->d_name); // match found
+                    }
+                }
+            }
+            closedir(dirp); // done with this dir
+            dirp = NULL;
+        }
+        dir = strtok(NULL, ":"); // move to the next dir
+    }
+    
+    return NULL; // no more matches
 }
+
+/*
+How readline works:
+1. users press tab
+2. readline calls command_generator(text, 0) - first call
+3. function returns first match
+4. readline calls command_generator(text, 1) - continue
+5, function returns next match
+6. repeats until return NULL
+*/
 
 char **builtin_completition(const char *text, int start, int end) {
     char **matches = NULL;
 
     // only complete if beginning of line (complete only command itself)
     if (start == 0) {
-        matches = rl_completion_matches(text, builtin_generator);
+        matches = rl_completion_matches(text, command_generator);
     }
     return matches; // return array of matches
 }
@@ -68,14 +144,14 @@ char *read_command_readline() {
     char *input = readline("$ ");
 
     // Handle EOF (Ctrl+D)
-    if (input == NULL) {
+    if (input == NULL) { // Ctrl+D pressed
         printf("\n");
         exit(0);
     }
 
     // Add to history if not empty
-    if (input && *input) { 
-        add_history(input);
+    if (input && *input) { // non-empty input
+        add_history(input); 
     }
     return input;
 }
@@ -106,9 +182,10 @@ char* find_executable(const char *command) {
         return NULL;
     }
     char path_copy[MAX_CMD_LEN];
-    strncpy(path_copy, path_env, sizeof(path_copy) - 1); 
+    strncpy(path_copy, path_env, sizeof(path_copy) - 1);  
     path_copy[sizeof(path_copy) - 1] = '\0'; // add null terminator
-    
+    // strncpy don't guarantee null termination so for safety we add it manually
+
     char *dir_path = strtok(path_copy, ":"); // divide PATH by ':'
     while (dir_path != NULL) {
         char full_path[MAX_CMD_LEN];
@@ -133,9 +210,9 @@ char* find_executable(const char *command) {
 
 // Function to tokenize command into arguments (quotes & escapes handled)
 int parse_command(char *input, char **argv) {
-    int argc = 0;
-    int i = 0;
-    char current_arg[MAX_CMD_LEN]; 
+    int argc = 0; // arg count
+    int i = 0; // input index
+    char current_arg[MAX_CMD_LEN]; // buffer for building argument
     int arg_pos = 0; // index of current_arg
     int in_single_quote = 0;
     int in_double_quote = 0;
@@ -220,6 +297,13 @@ int parse_command(char *input, char **argv) {
 
     argv[argc] = NULL; // null terminate argv
     return argc;
+
+/*
+- current arg is a temorary buffer on the stack
+- it gets overwritten for each new argument
+- we need each argument to persists so we copy to heap with malloc
+- argv[argc] = NULL: Many functions expect argv to end with NULL
+*/
 }
 
 // Release allocated memory for argv
@@ -297,11 +381,32 @@ int execute_builtin(char **argv, char *redirect_file, char *redirect_stderr_file
         dup2(redirect_stderr_fd, STDERR_FILENO);
     }
 
+    /*
+    dup2 does:
+    - closes STDOUT_FILENO (fd1)
+    - makes STDOUT_FILENO point to the same file as redirect_fd
+    - printf() now writes to file and not terminal
+
+    Flags explained:
+    - O_WRONLY: Open for writing only
+    - O_CREAT: Create file if it doesn't exist
+    - O_TRUNC: Truncate (clear) file if it exists
+    - O_APPEND: Append to end instead of truncating
+    - 0644: Permissions (owner can read/write, others can read)
+    */
+
     int result = 0;
     
-    // check if the command is "exit" and the second argument is "0":
-    if (strcmp(argv[0], "exit") == 0 && argv[1] && strcmp(argv[1], "0") == 0) {
-        exit(0);
+    // === "exit" command ===
+    if (strcmp(argv[0], "exit") == 0) {
+        if (argv[1] != NULL) {
+            // Exit with the provided code
+            int code = atoi(argv[1]); // convert string to integer
+            exit(code);
+        } else {
+            // Exit with 0 if no argument provided
+            exit(0);
+        }
     }
 
     // === "echo" command ===
@@ -339,7 +444,7 @@ int execute_builtin(char **argv, char *redirect_file, char *redirect_stderr_file
     
     // === "pwd" command ===
     else if (strcmp(argv[0], "pwd") == 0) {
-        char *cwd = getcwd(NULL, 0);
+        char *cwd = getcwd(NULL, 0); // system allocates memory for current working directory
         // char cwd[PATH_MAX]; // alternative way with static buffer
         if (cwd != NULL) {
             printf("%s\n", cwd);
@@ -393,7 +498,16 @@ int execute_external(char **argv, char *redirect_file, char *redirect_stderr_fil
     }
 
     // Create a new process (pid_t = process ID type)
-    pid_t pid = fork();
+    pid_t pid = fork(); 
+
+    /*
+    fork does:
+    - creates exact copy of the current process (parent)
+    - returns twice:
+        - in partent: returns child's PID
+        - in child: returns 0
+    - both process continue from same point 
+    */
 
     if (pid == -1) {
         perror("fork failed");
@@ -452,6 +566,20 @@ int execute_external(char **argv, char *redirect_file, char *redirect_stderr_fil
             perror("execve failed");
             exit(1);
         }
+
+        /*
+        execve does:
+        - Replaces the current process with a new program
+        - Never returns on success
+        - If it returns, something went wrong
+
+        Flow:
+        - Child process created with fork()
+        - Child sets up redirections
+        - Child calls execve() to become the new program
+        - New program runs and eventually exits
+        - Parent waits for child to finish
+        */
     }
     else {
         // Parent process
