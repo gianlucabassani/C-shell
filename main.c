@@ -599,6 +599,95 @@ int execute_external(char **argv, char *redirect_file, char *redirect_stderr_fil
     return 0;
 }
 
+void execute_pipeline(char **argv1, char **argv2) {
+    int pipefd[2];
+    pid_t pid1, pid2;
+
+    // create pipe
+    if (pipe(pipefd) == -1) {
+        perror("pipe failed");
+        return;
+    }
+
+    // fork first child (writer)
+    pid1 = fork();
+    if (pid1 == -1) {
+        perror("fork failed");
+        return;
+    } else if (pid1 == 0) {
+        // Child 1 process
+        close(pipefd[0]); // close read end
+        
+        // Connect stdout to pipe write end
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+
+        // built-in recognition
+        if (is_builtin(argv1[0])) {
+            //NULL for redirection files because the pipe is already handling output
+            execute_builtin(argv1, NULL, NULL, NULL, NULL);
+            
+            // the child is a copy of the shell
+            // we need to exit so the child don't continue executing the main shell loop
+            exit(0); 
+        }
+        else {
+            // external command
+            // Find executable
+            char *full_path = find_executable(argv1[0]);
+            if (full_path == NULL) {
+                fprintf(stderr, "%s: command not found\n", argv1[0]);
+                exit(1);
+            }
+            extern char **environ;
+            execve(full_path, argv1, environ);
+            perror("execve child 1");
+            free(full_path);
+            exit(1);
+        }
+    }
+
+        
+    // fork second child (reader) // TO DO
+    pid2 = fork();
+    if (pid2 == -1) {
+        perror("fork failed");
+        return;
+    }
+    else if (pid2 == 0) {
+        // child 2 process
+        close(pipefd[1]); // close unused write end
+
+        // connect stdin to pipe read end
+        dup2(pipefd[0], STDIN_FILENO);
+        close(pipefd[0]);
+
+        // find executable
+        if (is_builtin(argv2[0])) {
+            execute_builtin(argv2, NULL, NULL, NULL, NULL);
+            exit(0);
+        }
+        else {
+            char *full_path = find_executable(argv2[0]);
+            if (full_path == NULL) {
+                fprintf(stderr, "%s: command not found\n", argv2[0]);
+                exit(1);
+            }
+            extern char **environ;
+            execve(full_path, argv2, environ);
+            perror("execve child 2");
+            free(full_path);
+            exit(1);
+        }
+    }
+    // parent cleanup
+    close(pipefd[0]);
+    close(pipefd[1]);
+
+    // wait for children 
+    waitpid(pid1, NULL, 0);
+    waitpid(pid2, NULL, 0);
+}
 
 int main() {
     // Disable buffering for immediate output
@@ -623,6 +712,34 @@ int main() {
         if (strlen(input) == 0) {
             free(input);
             continue;
+        }
+
+        char *pipe_pos = strchr(input, '|');
+
+        if (pipe_pos != NULL) {
+        // We found a pipe! Split the string.
+            *pipe_pos = '\0'; // Replace '|' with null terminator to cut the string
+            char *cmd1_str = input;          // First part (start)
+            char *cmd2_str = pipe_pos + 1;   // Second part (after the |)
+
+            // Prepare args
+            char *argv1[MAX_ARGS];
+            char *argv2[MAX_ARGS];
+
+            // Parse both parts
+            int argc1 = parse_command(cmd1_str, argv1);
+            int argc2 = parse_command(cmd2_str, argv2);
+
+            // Execute if both are valid
+            if (argc1 > 0 && argc2 > 0) {
+                execute_pipeline(argv1, argv2);
+            }
+
+            // Clean up
+            free_argv(argv1, argc1);
+            free_argv(argv2, argc2);
+            free(input);
+            continue; // Skip the rest of the loop
         }
 
         // Tokenize command into arguments
