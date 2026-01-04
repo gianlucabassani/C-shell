@@ -15,6 +15,7 @@
 #define CMD_AVAILABLE 6
 #define MAX_PIPELINE_CMDS 32 
 
+
 static const char *builtin_cmd[CMD_AVAILABLE] = {"exit", "echo", "type", "pwd", "cd", "history"};
 
 /*
@@ -142,16 +143,62 @@ void initialize_readline() {
 }
 
 char *read_command_readline() {
-    char *input = readline("$ ");
+    // Build dynamic prompt with red theme
+    char prompt[MAX_CMD_LEN];
+    
+    // Get username
+    char *username = getenv("USER");
+    if (username == NULL) username = "user";
+    
+    // Get hostname
+    char hostname[256];
+    if (gethostname(hostname, sizeof(hostname)) != 0) {
+        strcpy(hostname, "localhost");
+    }
+    
+    // Get current directory
+    char *cwd = getcwd(NULL, 0);
+    if (cwd == NULL) {
+        perror("getcwd failed");
+        cwd = strdup("/");
+    }
+    
+    // Shorten home directory to ~
+    char *home = getenv("HOME");
+    char display_path[MAX_CMD_LEN];
+    if (home != NULL && strncmp(cwd, home, strlen(home)) == 0) {
+        snprintf(display_path, sizeof(display_path), "~%s", cwd + strlen(home));
+    } else {
+        snprintf(display_path, sizeof(display_path), "%s", cwd);
+    }
+    
+    // Get time
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
 
+    // Format: [12:34] user@hostname:~/path$ 
+    snprintf(prompt, sizeof(prompt), 
+            "\033[33m[%02d:%02d]\033[0m "  // time (yellow)
+            "\033[31m\033[1m%s\033[0m"    // username (red)
+            "\033[33m\033[1m@\033[0m"             // @ separator
+            "\033[31m\033[1m%s\033[0m"     // hostname (red)
+            "\033[33m:\033[0m"             // : separator
+            "\033[91m%s\033[0m"           // path (bright red)
+            "\033[33m$\033[0m",           // prompt symbol (yellow),
+
+            t->tm_hour, t->tm_min, username, hostname, display_path);
+    
+    char *input = readline(prompt);
+    free(cwd);
+    
     // Handle EOF (Ctrl+D)
-    if (input == NULL) { // Ctrl+D pressed
+    if (input == NULL) {
         printf("\n");
         exit(0);
     }
 
     // Add to history if not empty
-    if (input && *input) { // non-empty input
+    if (input && *input) {
         add_history(input); 
     }
     return input;
