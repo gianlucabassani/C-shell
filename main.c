@@ -12,9 +12,10 @@
 
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 64
-#define CMD_AVAILABLE 5
+#define CMD_AVAILABLE 6
+#define MAX_PIPELINE_CMDS 32 
 
-static const char *builtin_cmd[CMD_AVAILABLE] = {"exit", "echo", "type", "pwd", "cd"};
+static const char *builtin_cmd[CMD_AVAILABLE] = {"exit", "echo", "type", "pwd", "cd", "history"};
 
 /*
 static = variable only visible in this file
@@ -471,7 +472,40 @@ int execute_builtin(char **argv, char *redirect_file, char *redirect_stderr_file
             result = 1;
         }
     }
+
+    // === "history" command with limiting argument ===
+
     
+    // === "history" command ===
+    else if (strcmp(argv[0], "history") == 0) {
+        
+        if (argv[1] != NULL) {
+            // Show last N entries
+            int hist_limit = atoi(argv[1]); // convert arg string to int
+            int tot_hist = history_length; // tot hist entries
+            int start = tot_hist - hist_limit; // calculate start index
+            
+            if (start < 0) start = 0;
+            
+            for (int i = start; i < tot_hist; i++) {
+                HIST_ENTRY *entry = history_get(i + history_base); // get history entry at index (history_base = usually 1)
+                if (entry != NULL) { 
+                    printf("%d %s\n", i + history_base, entry->line); // print index and command line
+                }
+            }
+        } 
+        else {
+            // Show all entries
+            HIST_ENTRY **the_list = history_list(); // full history list
+            
+            if (the_list != NULL) { 
+                for (int i = 0; the_list[i] != NULL; i++) {
+                    printf("%d %s\n", i + history_base, the_list[i]->line); 
+                }
+            }
+        }
+    }
+
     // Restore original stdout if we redirected
     if (redirect_file != NULL || append_file != NULL) {
         dup2(original_stdout, STDOUT_FILENO);
@@ -599,94 +633,76 @@ int execute_external(char **argv, char *redirect_file, char *redirect_stderr_fil
     return 0;
 }
 
-void execute_pipeline(char **argv1, char **argv2) {
-    int pipefd[2];
-    pid_t pid1, pid2;
-
-    // create pipe
-    if (pipe(pipefd) == -1) {
-        perror("pipe failed");
-        return;
+// New multi-stage pipeline function
+void execute_pipeline(char ***commands, int num_commands) {
+    int pipes[MAX_PIPELINE_CMDS - 1][2];  // Array of pipe file descriptors 
+    pid_t pids[MAX_PIPELINE_CMDS];
+    
+    // Create all needed pipes
+    for (int i = 0; i < num_commands - 1; i++) {
+        if (pipe(pipes[i]) == -1) { // ex. if num_commands = 3, we need 2 pipes: pipe[0] and pipe[1] that connect cmd1->cmd2 and cmd2->cmd3
+            perror("pipe failed");
+            return;
+        }
     }
-
-    // fork first child (writer)
-    pid1 = fork();
-    if (pid1 == -1) {
-        perror("fork failed");
-        return;
-    } else if (pid1 == 0) {
-        // Child 1 process
-        close(pipefd[0]); // close read end
+    
+    // Fork and execute each command
+    for (int i = 0; i < num_commands; i++) {
+        pids[i] = fork();
         
-        // Connect stdout to pipe write end
-        dup2(pipefd[1], STDOUT_FILENO);
-        close(pipefd[1]);
-
-        // built-in recognition
-        if (is_builtin(argv1[0])) {
-            //NULL for redirection files because the pipe is already handling output
-            execute_builtin(argv1, NULL, NULL, NULL, NULL);
+        if (pids[i] == -1) {
+            perror("fork failed");
+            return;
+        }
+        else if (pids[i] == 0) {
+            // Child process
             
-            // the child is a copy of the shell
-            // we need to exit so the child don't continue executing the main shell loop
-            exit(0); 
-        }
-        else {
-            // external command
-            // Find executable
-            char *full_path = find_executable(argv1[0]);
-            if (full_path == NULL) {
-                fprintf(stderr, "%s: command not found\n", argv1[0]);
+            // Set up stdin: read from previous pipe (if not first command)
+            if (i > 0) {
+                dup2(pipes[i - 1][0], STDIN_FILENO);
+            }
+            
+            // Set up stdout: write to next pipe (if not last command)
+            if (i < num_commands - 1) {
+                dup2(pipes[i][1], STDOUT_FILENO);
+            }
+            
+            // Close all pipe file descriptors in child
+            for (int j = 0; j < num_commands - 1; j++) {
+                close(pipes[j][0]);
+                close(pipes[j][1]);
+            }
+            
+            // Execute the command
+            if (is_builtin(commands[i][0])) {
+                execute_builtin(commands[i], NULL, NULL, NULL, NULL);
+                exit(0);
+            }
+            else {
+                char *full_path = find_executable(commands[i][0]);
+                if (full_path == NULL) {
+                    fprintf(stderr, "%s: command not found\n", commands[i][0]);
+                    exit(1);
+                }
+                extern char **environ;
+                execve(full_path, commands[i], environ);
+                perror("execve failed");
+                free(full_path);
                 exit(1);
             }
-            extern char **environ;
-            execve(full_path, argv1, environ);
-            perror("execve child 1");
-            free(full_path);
-            exit(1);
         }
     }
-
-        
-    // fork second child (reader) // TO DO
-    pid2 = fork();
-    if (pid2 == -1) {
-        perror("fork failed");
-        return;
+    
+    // Parent: close all pipe file descriptors
+    for (int i = 0; i < num_commands - 1; i++) {
+        close(pipes[i][0]);
+        close(pipes[i][1]);
     }
-    else if (pid2 == 0) {
-        // child 2 process
-        close(pipefd[1]); // close unused write end
-
-        // connect stdin to pipe read end
-        dup2(pipefd[0], STDIN_FILENO);
-        close(pipefd[0]);
-
-        // find executable
-        if (is_builtin(argv2[0])) {
-            execute_builtin(argv2, NULL, NULL, NULL, NULL);
-            exit(0);
-        }
-        else {
-            char *full_path = find_executable(argv2[0]);
-            if (full_path == NULL) {
-                fprintf(stderr, "%s: command not found\n", argv2[0]);
-                exit(1);
-            }
-            extern char **environ;
-            execve(full_path, argv2, environ);
-            perror("execve child 2");
-            free(full_path);
-            exit(1);
-        }
+    
+    // Wait for all children
+    for (int i = 0; i < num_commands; i++) {
+        waitpid(pids[i], NULL, 0);
     }
-    // parent cleanup
-    close(pipefd[0]);
-    close(pipefd[1]);
-
-    // wait for children 
-    waitpid(pid1, NULL, 0);
-    waitpid(pid2, NULL, 0);
 }
 
 int main() {
@@ -714,44 +730,106 @@ int main() {
             continue;
         }
 
-        char *pipe_pos = strchr(input, '|');
+        // Check for pipes and count them
+        int pipe_count = 0;
+        for (int i = 0; input[i] != '\0'; i++) {
+            if (input[i] == '|') {
+                pipe_count++;
+            }
+        }
+        // pipe_count tells us how many '|' symbols exist
+        // Number of commands = pipe_count + 1
 
-        if (pipe_pos != NULL) {
-        // We found a pipe! Split the string.
-            *pipe_pos = '\0'; // Replace '|' with null terminator to cut the string
-            char *cmd1_str = input;          // First part (start)
-            char *cmd2_str = pipe_pos + 1;   // Second part (after the |)
-
-            // Prepare args
-            char *argv1[MAX_ARGS];
-            char *argv2[MAX_ARGS];
-
-            // Parse both parts
-            int argc1 = parse_command(cmd1_str, argv1);
-            int argc2 = parse_command(cmd2_str, argv2);
-
-            // Execute if both are valid
-            if (argc1 > 0 && argc2 > 0) {
-                execute_pipeline(argv1, argv2);
+        if (pipe_count > 0) {
+            // Handle multi-stage pipeline
+            
+            char **commands[MAX_PIPELINE_CMDS];  // Array of argv arrays
+            char *cmd_strings[MAX_PIPELINE_CMDS];  // Array of command strings before parsing
+            int num_commands = pipe_count + 1;  // Number of commands in pipeline
+            
+            if (num_commands > MAX_PIPELINE_CMDS) {
+                fprintf(stderr, "Error: Too many pipeline stages\n");
+                free(input);
+                continue;
+            }
+            
+            // Split input string by '|' 
+            char *saveptr;  //  remember position
+            char *token = strtok_r(input, "|", &saveptr); // strtok_r splits input by "|" and returns first token
+            
+            int cmd_idx = 0;
+            while (token != NULL && cmd_idx < num_commands) {
+                cmd_strings[cmd_idx] = token;  // Save pointer to this command string
+                cmd_idx++;
+                token = strtok_r(NULL, "|", &saveptr);  // Get next token
             }
 
-            // Clean up
-            free_argv(argv1, argc1);
-            free_argv(argv2, argc2);
+            // Parse each command string into argv
+            int parsing_failed = 0;
+            
+            for (int i = 0; i < num_commands; i++) {
+                // Allocate argv array for this command
+                commands[i] = malloc(MAX_ARGS * sizeof(char *));
+                if (commands[i] == NULL) {
+                    perror("malloc failed");
+                    parsing_failed = 1;
+                    for (int j = 0; j < i; j++) {
+                        for (int k = 0; commands[j][k] != NULL; k++) {
+                            free(commands[j][k]);
+                        }
+                        free(commands[j]);
+                    }
+                    break;
+                }
+                
+                // Parse the command string into arguments
+                int argc = parse_command(cmd_strings[i], commands[i]);
+                if (argc <= 0) {
+                    fprintf(stderr, "Error: Failed to parse command in pipeline\n");
+                    parsing_failed = 1;
+                    // Clean up what we've allocated so far
+                    for (int j = 0; j <= i; j++) {
+                        if (commands[j] != NULL) {
+                            free(commands[j]);
+                        }
+                    }
+                    break;
+                }
+            }
+ 
+            if (!parsing_failed) {
+                // Execute the pipeline
+                execute_pipeline(commands, num_commands);
+                
+                // Clean up allocated memory 
+                for (int i = 0; i < num_commands; i++) {
+                    // Free each argument in this command's argv
+                    for (int j = 0; commands[i][j] != NULL; j++) {
+                        free(commands[i][j]);
+                    }
+                    // Free the argv array itself
+                    free(commands[i]);
+                }
+            }
+            
             free(input);
-            continue; // Skip the rest of the loop
+            continue;  
         }
 
+        // Normal single command execution
+        
         // Tokenize command into arguments
         int argc = parse_command(input, argv);
         
         // Handle parsing errors (unclosed quotes)
         if (argc == -1) {
+            free(input);
             continue; // Skip to next iteration
         }
         
         // Handle empty command after parsing
         if (argc == 0 || argv[0] == NULL) {
+            free(input);
             continue;
         }
 
@@ -764,7 +842,8 @@ int main() {
                     // strdup to allocate memory for filename for a safe copy
                     if (!redirect_file) {
                         perror("strdup failed");
-                        free_argv(argv, argc); 
+                        free_argv(argv, argc);
+                        free(input);
                         continue;
                     }
                     // Free the redirection operator and filename from argv
@@ -775,6 +854,7 @@ int main() {
                 } else {
                     fprintf(stderr, "Error: No file specified for redirection\n");
                     free_argv(argv, argc);
+                    free(input);
                     continue; // Skip command execution
                 }
                 break;
@@ -787,6 +867,7 @@ int main() {
                     if (append_file == NULL) {
                         perror("strdup failed");
                         free_argv(argv, argc);
+                        free(input);
                         continue;
                     }
                     // free redirect op and filename from argv
@@ -797,6 +878,7 @@ int main() {
                 } else {
                     fprintf(stderr, "Error: No file specified for stdout appending\n");
                     free_argv(argv, argc);
+                    free(input);
                     continue;
                 }
                 break;
@@ -810,6 +892,7 @@ int main() {
                         perror("strdup failed");
                         free_argv(argv, argc);
                         if (redirect_file != NULL) free(redirect_file);
+                        free(input);
                         continue;
                     }
                     // Free the redirection operator and filename from argv
@@ -821,6 +904,7 @@ int main() {
                     fprintf(stderr, "Error: No file specified for stderr redirection\n");
                     free_argv(argv, argc);
                     if (redirect_file) free(redirect_file);
+                    free(input);
                     continue;
                 }
                 break;
@@ -832,6 +916,7 @@ int main() {
                         perror("strdup failed");
                         free_argv(argv, argc);
                         if (redirect_file) free(redirect_file);
+                        free(input);
                         continue;
                     }
                     free(argv[i]);
@@ -842,6 +927,7 @@ int main() {
                     fprintf(stderr, "Error: No file specified for stderr append\n");
                     free_argv(argv, argc);
                     if (redirect_file) free(redirect_file);
+                    free(input);
                     continue;
                 }
                 break;
@@ -871,7 +957,9 @@ int main() {
         if (append_stderr_file != NULL) {
             free(append_stderr_file);
         }
+        
+        free(input);
     }
 
-return 0;
+    return 0;
 }
