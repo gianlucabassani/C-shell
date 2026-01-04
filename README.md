@@ -31,6 +31,7 @@ This project implements a **POSIX-compliant shell** capable of interpreting shel
 * `type` – identifies whether a command is builtin or external.
 * `pwd` – prints current working directory (`getcwd`, dynamic allocation).
 * `cd` – changes current directory, supports `$HOME` and relative paths.
+* `history` – lists and recall previously executed commands. 
 
 ### 4. External Command Execution
 
