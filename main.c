@@ -17,6 +17,13 @@
 
 
 static const char *builtin_cmd[CMD_AVAILABLE] = {"exit", "echo", "type", "pwd", "cd", "history"};
+static int last_appended_count = 0;
+static int initial_history_length = 0;
+
+
+// Prototypes
+void load_history_from_histfile(void);
+void save_history_to_histfile(void);
 
 /*
 static = variable only visible in this file
@@ -32,6 +39,23 @@ char *dupstr(char *s) {
 }
 // the caller must free() later
 
+int apply_redirection(const char *filename, int target_fd, int flags) {
+    if (filename == NULL) return 0;
+
+    int fd = open(filename, flags, 0644);
+    if (fd == -1) {
+        perror("open failed");
+        return -1;
+    }
+    
+    if (dup2(fd, target_fd) == -1) {
+        perror("dup2 failed");
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    return 0; // Success
+}
 
 char *command_generator(const char *text, int state) {
     static int list_index, len;
@@ -111,15 +135,6 @@ char *command_generator(const char *text, int state) {
     return NULL; // no more matches
 }
 
-/*
-How readline works:
-1. users press tab
-2. readline calls command_generator(text, 0) - first call
-3. function returns first match
-4. readline calls command_generator(text, 1) - continue
-5, function returns next match
-6. repeats until return NULL
-*/
 
 char **builtin_completition(const char *text, int start, int end) {
     char **matches = NULL;
@@ -143,7 +158,6 @@ void initialize_readline() {
 }
 
 char *read_command_readline() {
-    // Build dynamic prompt with red theme
     char prompt[MAX_CMD_LEN];
     
     // Get username
@@ -173,25 +187,29 @@ char *read_command_readline() {
     }
     
     // Get time
+    char timebuf[6];
+
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
+    strftime(timebuf, sizeof(timebuf), "%H:%M", t);
 
     // Format: [12:34] user@hostname:~/path$ 
     snprintf(prompt, sizeof(prompt), 
-            "\033[33m[%02d:%02d]\033[0m "  // time (yellow)
+            "\033[33m[%s]\033[0m "         // time (yellow)
             "\033[31m\033[1m%s\033[0m"    // username (red)
-            "\033[33m\033[1m@\033[0m"             // @ separator
+            "\033[33m\033[1m@\033[0m"      // @ separator
             "\033[31m\033[1m%s\033[0m"     // hostname (red)
             "\033[33m:\033[0m"             // : separator
             "\033[91m%s\033[0m"           // path (bright red)
-            "\033[33m$\033[0m",           // prompt symbol (yellow),
+            "\033[33m$ \033[0m",           // prompt symbol (yellow),
 
-            t->tm_hour, t->tm_min, username, hostname, display_path);
+            timebuf, username, hostname, display_path);
     
     char *input = readline(prompt);
     free(cwd);
     
     // Handle EOF (Ctrl+D)
+    save_history_to_histfile();
     if (input == NULL) {
         printf("\n");
         exit(0);
@@ -202,25 +220,8 @@ char *read_command_readline() {
         add_history(input); 
     }
     return input;
+ 
 }
-
-/* ============ OLD ===========
-
-// Function to read input from stdin
-void read_command(char *input) {
-    if (fgets(input, MAX_CMD_LEN, stdin) == NULL) {
-        // Handle EOF (Ctrl+D)
-        printf("\n");
-        exit(0);
-    }
-    
-    // Remove newline character
-    size_t len = strlen(input);
-    if (len > 0 && input[len - 1] == '\n') {
-        input[len - 1] = '\0';
-    }
-}
-*/
 
 
 // Function to find executable in PATH
@@ -380,54 +381,22 @@ int execute_builtin(char **argv, char *redirect_file, char *redirect_stderr_file
     
     int original_stdout = -1;
     int original_stderr = -1;
+    int result = 0;
 
-    // file descriptors (non-negative integer that uniquely identifies an opened file or other input/output resource)
-    int redirect_fd = -1;
-    int redirect_stderr_fd = -1;
-
-    // Handle output redirection for builtin commands
-    if (redirect_file != NULL) {
-        original_stdout = dup(STDOUT_FILENO); // save original stdout
-        redirect_fd = open(redirect_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (redirect_fd == -1) {
-            perror("open for redirection failed");
-            return 1;
-        }
-        dup2(redirect_fd, STDOUT_FILENO); // redirect stdout to file
-    }
-    
-    // append stdout
-    if (append_file != NULL) {
+    // Save original file descriptors BEFORE redirecting
+    if (redirect_file || append_file) {
         original_stdout = dup(STDOUT_FILENO);
-        redirect_fd = open(append_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (redirect_fd == -1) {
-            perror("open for append failed");
-            return 1;
-        }
-        dup2(redirect_fd, STDOUT_FILENO);
+    }
+    if (redirect_stderr_file || append_stderr_file) {
+        original_stderr = dup(STDERR_FILENO);
     }
 
-    // truncate stderr redirection (if both stdout and stderr redirection are specified, stdout redirection is restored first)
-    if (redirect_stderr_file != NULL) {
-        original_stderr = dup(STDERR_FILENO);
-        redirect_stderr_fd = open(redirect_stderr_file, O_WRONLY | O_CREAT | O_TRUNC, 0644); 
-        if (redirect_stderr_fd == -1) {
-            perror("open for stderr redirection failed");
-            return 1;
-        }
-        dup2(redirect_stderr_fd, STDERR_FILENO);
-    }
+    // Apply redirections using helper
+    if (apply_redirection(redirect_file, STDOUT_FILENO, O_WRONLY | O_CREAT | O_TRUNC) == -1) return 1;
+    if (apply_redirection(append_file, STDOUT_FILENO, O_WRONLY | O_CREAT | O_APPEND) == -1) return 1;
+    if (apply_redirection(redirect_stderr_file, STDERR_FILENO, O_WRONLY | O_CREAT | O_TRUNC) == -1) return 1;
+    if (apply_redirection(append_stderr_file, STDERR_FILENO, O_WRONLY | O_CREAT | O_APPEND) == -1) return 1;
 
-    // append stderr redirection
-    if (append_stderr_file != NULL) {
-        original_stderr = dup(STDERR_FILENO);
-        redirect_stderr_fd = open(append_stderr_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (redirect_stderr_fd == -1) {
-            perror("open for stderr append failed");
-            return 1;
-        }
-        dup2(redirect_stderr_fd, STDERR_FILENO);
-    }
 
     /*
     dup2 does:
@@ -442,11 +411,10 @@ int execute_builtin(char **argv, char *redirect_file, char *redirect_stderr_file
     - O_APPEND: Append to end instead of truncating
     - 0644: Permissions (owner can read/write, others can read)
     */
-
-    int result = 0;
     
     // === "exit" command ===
     if (strcmp(argv[0], "exit") == 0) {
+        save_history_to_histfile();
         if (argv[1] != NULL) {
             // Exit with the provided code
             int code = atoi(argv[1]); // convert string to integer
@@ -520,52 +488,121 @@ int execute_builtin(char **argv, char *redirect_file, char *redirect_stderr_file
         }
     }
 
-    // === "history" command with limiting argument ===
-
     
     // === "history" command ===
     else if (strcmp(argv[0], "history") == 0) {
-        
-        if (argv[1] != NULL) {
-            // Show last N entries
-            int hist_limit = atoi(argv[1]); // convert arg string to int
-            int tot_hist = history_length; // tot hist entries
-            int start = tot_hist - hist_limit; // calculate start index
-            
-            if (start < 0) start = 0;
-            
-            for (int i = start; i < tot_hist; i++) {
-                HIST_ENTRY *entry = history_get(i + history_base); // get history entry at index (history_base = usually 1)
-                if (entry != NULL) { 
-                    printf("%d %s\n", i + history_base, entry->line); // print index and command line
+    
+        // Handle history -r <filename>
+        if (argv[1] != NULL && strcmp(argv[1], "-r") == 0) {
+            if (argv[2] == NULL) {
+                fprintf(stderr, "history: -r: option requires an argument\n");
+                result = 1;
+            } else {
+                if (read_history(argv[2]) != 0) {
+                    fprintf(stderr, "history: %s: ", argv[2]);
+                    perror("");
+                    result = 1;
                 }
             }
-        } 
+        }
+        // Handle history -w <filename>
+        else if (argv[1] != NULL && strcmp(argv[1], "-w") == 0) {
+            if (argv[2] == NULL) {
+                fprintf(stderr, "history: -w: option requires an argument\n");
+                result = 1;
+            } else {
+                if (write_history(argv[2]) != 0) {
+                    fprintf(stderr, "history: %s: ", argv[2]);
+                    perror("");
+                    result = 1;
+                } else {
+                    last_appended_count = history_length;
+                }
+            }
+        }
+        // Handle history -a <filename>
+        else if (argv[1] != NULL && strcmp(argv[1], "-a") == 0) {
+            if (argv[2] == NULL) {
+                fprintf(stderr, "history: -a: option requires an argument\n");
+                result = 1;
+            } else {
+                int new_entries = history_length - last_appended_count;
+                if (new_entries > 0) {
+                    if (append_history(new_entries, argv[2]) != 0) {
+                        fprintf(stderr, "history: %s: ", argv[2]);
+                        perror("");
+                        result = 1;
+                    } else {
+                        last_appended_count = history_length;
+                    }
+                }
+            }
+        }
+        else if (argv[1] != NULL) {
+            // Show last N entries
+            int limit = atoi(argv[1]);
+            int start = history_length - limit;
+            if (start < 0) start = 0;
+            
+            for (int i = start; i < history_length; i++) {
+                HIST_ENTRY *entry = history_get(i + history_base);
+                if (entry != NULL) {
+                    printf("%d  %s\n", i + history_base, entry->line);
+                }
+            }
+        }
         else {
             // Show all entries
-            HIST_ENTRY **the_list = history_list(); // full history list
-            
-            if (the_list != NULL) { 
-                for (int i = 0; the_list[i] != NULL; i++) {
-                    printf("%d %s\n", i + history_base, the_list[i]->line); 
+            HIST_ENTRY **list = history_list();
+            if (list != NULL) {
+                for (int i = 0; list[i] != NULL; i++) {
+                    printf("%d %s\n", i + history_base, list[i]->line);
                 }
             }
         }
     }
-
-    // Restore original stdout if we redirected
-    if (redirect_file != NULL || append_file != NULL) {
+    // Restore original stdout
+    if (original_stdout != -1) {
         dup2(original_stdout, STDOUT_FILENO);
         close(original_stdout);
-        close(redirect_fd);
     }
-    if (redirect_stderr_file != NULL || append_stderr_file != NULL) {
+
+    // Restore original stderr
+    if (original_stderr != -1) {
         dup2(original_stderr, STDERR_FILENO);
         close(original_stderr);
-        close(redirect_stderr_fd);
     }
     
     return result;
+}
+
+
+void load_history_from_histfile() {
+    char *histfile = getenv("HISTFILE");
+    if (histfile != NULL) {
+        // Load history from HISTFILE
+        read_history(histfile);
+        // Remember how many entries we loaded
+        initial_history_length = history_length;
+        last_appended_count = history_length;
+    }
+}
+
+
+void save_history_to_histfile() {
+    char *histfile = getenv("HISTFILE");
+    if (histfile != NULL) {
+        if (initial_history_length > 0) {
+            // File had history at startup - APPEND new entries only
+            int new_entries = history_length - last_appended_count;
+            if (new_entries > 0) {
+                append_history(new_entries, histfile);
+            }
+        } else {
+            // File was empty or didn't exist - WRITE all history
+            write_history(histfile);
+        }
+    }
 }
 
 // Function to execute external commands
@@ -597,48 +634,25 @@ int execute_external(char **argv, char *redirect_file, char *redirect_stderr_fil
     }
     else if (pid == 0) {
         // Child process
-        if (redirect_file != NULL) {
-            int out_f = open(redirect_file, O_WRONLY | O_CREAT | O_TRUNC, 0644); 
-            // where O_WRONLY = open for write only, O_CREAT = create if not exists, O_TRUNC = truncate to zero length if exists, 0644 = permissions
-            if (out_f == -1) {
-                perror("open for redirection failed");
-                exit(1);
-            }
-            dup2(out_f, STDOUT_FILENO); // redirect stdout to the file (STDOUT_FILENO = standard output file descriptor)
-            close(out_f);
+        
+        // 1. Handle STDOUT Redirection (overwrite >)
+        if (apply_redirection(redirect_file, STDOUT_FILENO, O_WRONLY | O_CREAT | O_TRUNC) == -1) {
+            exit(1);
         }
 
-        // append stdout
-        if (append_file != NULL) {
-            int out_f = open(append_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
-            if (out_f == -1) {
-                perror("open for append failed");
-                exit(1);
-            }
-            dup2(out_f, STDOUT_FILENO);
-            close(out_f);
+        // 2. Handle STDOUT Append (append >>)
+        if (apply_redirection(append_file, STDOUT_FILENO, O_WRONLY | O_CREAT | O_APPEND) == -1) {
+            exit(1);
         }
 
-        // stderr redirect
-        if (redirect_stderr_file != NULL) {
-            int err_f = open(redirect_stderr_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (err_f == -1) {
-                perror("open for stderr redirection failed");
-                exit(1);
-            }
-            dup2(err_f, STDERR_FILENO);
-            close(err_f);
+        // 3. Handle STDERR Redirection (overwrite 2>)
+        if (apply_redirection(redirect_stderr_file, STDERR_FILENO, O_WRONLY | O_CREAT | O_TRUNC) == -1) {
+            exit(1);
         }
 
-        // append stderr
-        if (append_stderr_file != NULL) {
-            int err_f = open(append_stderr_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
-            if (err_f == -1) {
-                perror("open for stderr append failed");
-                exit(1);
-            }
-            dup2(err_f, STDERR_FILENO);
-            close(err_f);
+        // 4. Handle STDERR Append (append 2>>)
+        if (apply_redirection(append_stderr_file, STDERR_FILENO, O_WRONLY | O_CREAT | O_APPEND) == -1) {
+            exit(1);
         }
 
 
@@ -759,7 +773,8 @@ int main() {
 
     // initialize readline library
     initialize_readline();
-    
+    load_history_from_histfile();
+
     while (1) {
 
         char *argv[MAX_ARGS];
@@ -770,6 +785,8 @@ int main() {
 
         // Read command using readline (tab completion enabled)
         char *input = read_command_readline();
+
+        
 
         // handle empty input
         if (strlen(input) == 0) {
